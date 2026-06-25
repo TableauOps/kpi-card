@@ -203,7 +203,7 @@
 
     // Bump this when index.html changes; shown as a badge on the card and should
     // match extension-version in super-kpi-card.trex.
-    var VERSION = "1.1.0";
+    var VERSION = "1.2.0";
 
     // These ids MUST match the <encoding id="..."> values in the .trex.
     var MEASURE_ENCODING_ID = "measure";
@@ -214,6 +214,9 @@
     var DEFAULTS = {
       title: "",            // custom card title; blank = use the field name
       aggregation: "sum",   // sum | avg | min | max | count | latest
+      periodGrain: "auto",  // auto | day | week | month | quarter | year — buckets the date for the sparkline & "latest"
+      currentOffset: "0",   // periods back from newest that count as the "current" period (0 = newest)
+      priorOffset: "1",     // periods back from the current period to compare against for the delta
       prefix: "$",          // text before the number
       suffix: "",           // text after the number
       decimals: "1",        // decimal places
@@ -241,6 +244,9 @@
       return {
         title: raw("title"),
         aggregation: raw("aggregation"),
+        periodGrain: raw("periodGrain"),
+        currentOffset: Math.max(0, parseInt(raw("currentOffset"), 10) || 0),
+        priorOffset: Math.max(1, parseInt(raw("priorOffset"), 10) || 1),
         prefix: raw("prefix"),
         suffix: raw("suffix"),
         decimals: parseInt(raw("decimals"), 10) || 0,
@@ -459,6 +465,50 @@
       return Date.parse(cell.value);
     }
 
+    /** Snap a timestamp to the start of its period for the chosen grain, so rows
+        in the same day/week/month/quarter/year collapse into one bucket. "auto"
+        keeps each distinct date value as-is (the date's native granularity). */
+    function truncateToGrain(ms, grain) {
+      var d = new Date(ms);
+      switch (grain) {
+        case "day":
+          return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+        case "week": {
+          var w = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+          w.setDate(w.getDate() - w.getDay()); // back up to Sunday
+          return w.getTime();
+        }
+        case "month":
+          return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+        case "quarter":
+          return new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1).getTime();
+        case "year":
+          return new Date(d.getFullYear(), 0, 1).getTime();
+        default:
+          return ms; // auto
+      }
+    }
+
+    /** Human label for a bucket. "auto" reuses Tableau's own formatted value so it
+        respects the field's date format on the viz. */
+    function grainLabel(ms, grain, fallback) {
+      var d = new Date(ms);
+      switch (grain) {
+        case "day":
+          return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        case "week":
+          return "Week of " + d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        case "month":
+          return d.toLocaleDateString(undefined, { year: "numeric", month: "short" });
+        case "quarter":
+          return "Q" + (Math.floor(d.getMonth() / 3) + 1) + " " + d.getFullYear();
+        case "year":
+          return String(d.getFullYear());
+        default:
+          return fallback; // auto
+      }
+    }
+
     async function updateKpi() {
       var cfg = getConfig();
       applyTheme(cfg);
@@ -498,15 +548,19 @@
         return;
       }
 
-      // --- With a date: build per-date sums, sorted oldest -> newest. ---
+      // --- With a date: bucket rows by the chosen grain, oldest -> newest. ---
       var dIdx = dateCol.index;
+      var grain = cfg.periodGrain;
       var sums = {};
       for (var i = 0; i < rows.length; i++) {
         var t = dateTime(rows[i][dIdx]);
         if (isNaN(t)) { continue; }
+        var key = truncateToGrain(t, grain);
         var mv = rows[i][mIdx].nativeValue;
-        if (!sums[t]) { sums[t] = { value: 0, label: rows[i][dIdx].formattedValue }; }
-        sums[t].value += (typeof mv === "number" && !isNaN(mv)) ? mv : 0;
+        if (!sums[key]) {
+          sums[key] = { value: 0, label: grainLabel(key, grain, rows[i][dIdx].formattedValue) };
+        }
+        sums[key].value += (typeof mv === "number" && !isNaN(mv)) ? mv : 0;
       }
       var times = Object.keys(sums).map(Number).sort(function (a, b) { return a - b; });
 
@@ -518,24 +572,31 @@
       // The per-period series (oldest -> newest) drives the sparkline.
       var seriesVals = times.map(function (t) { return sums[t].value; });
 
-      // "latest" shows the most recent period (and optional period-over-period delta).
+      // "latest" shows a chosen period (current) and compares it to an earlier one (prior).
       if (cfg.aggregation === "latest") {
-        var last = sums[times[times.length - 1]];
-        var caption = cfg.captionPrefix + last.label;
+        // Current = newest minus currentOffset; prior = current minus priorOffset.
+        var curIdx = times.length - 1 - cfg.currentOffset;
+        if (curIdx < 0) { curIdx = 0; }
+        var current = sums[times[curIdx]];
+        var caption = cfg.captionPrefix + current.label;
+
         var delta = null;
-        if (cfg.showDelta && times.length >= 2) {
-          var prev = sums[times[times.length - 2]].value;
-          if (prev !== 0) {
-            var pct = ((last.value - prev) / Math.abs(prev)) * 100;
-            delta = { pct: pct, up: pct >= 0 };
+        if (cfg.showDelta) {
+          var priorIdx = curIdx - cfg.priorOffset;
+          if (priorIdx >= 0) {
+            var prior = sums[times[priorIdx]].value;
+            if (prior !== 0) {
+              var pct = ((current.value - prior) / Math.abs(prior)) * 100;
+              delta = { pct: pct, up: pct >= 0 };
+            }
           }
         }
-        renderCard(cfg, measureField.name, last.value, caption, delta, seriesVals);
+        renderCard(cfg, measureField.name, current.value, caption, delta, seriesVals);
         return;
       }
 
       // Other aggregations with a date: value is aggregated across all rows, but
-      // the sparkline still shows the per-period trend.
+      // the sparkline still shows the per-period trend at the chosen grain.
       renderCard(cfg, measureField.name, aggregate(values, cfg.aggregation), null, null, seriesVals);
     }
 
@@ -588,6 +649,14 @@
         return '<option value="' + o[0] + '"' + sel + '>' + o[1] + "</option>";
       }).join("");
 
+      var grainOptions = [
+        ["auto", "Auto (date's own grain)"], ["day", "Day"], ["week", "Week"],
+        ["month", "Month"], ["quarter", "Quarter"], ["year", "Year"]
+      ].map(function (o) {
+        var sel = (raw("periodGrain") === o[0]) ? " selected" : "";
+        return '<option value="' + o[0] + '"' + sel + '>' + o[1] + "</option>";
+      }).join("");
+
       function txt(key) {
         return '<input type="text" id="cfg-' + key + '" value="' + escapeAttr(raw(key)) + '">';
       }
@@ -609,6 +678,13 @@
             dialogField("Suffix", txt("suffix")) +
             dialogField("Decimal places", '<input type="number" id="cfg-decimals" min="0" max="4" value="' + (parseInt(raw("decimals"), 10) || 0) + '">') +
             dialogField("Abbreviate large numbers", check("abbreviate")) +
+          "</fieldset>" +
+
+          '<fieldset><legend>Date &amp; periods</legend>' +
+            dialogField("Sparkline / period grain", '<select id="cfg-periodGrain">' + grainOptions + "</select>") +
+            dialogField("Current period (0 = newest)", '<input type="number" id="cfg-currentOffset" min="0" value="' + (parseInt(raw("currentOffset"), 10) || 0) + '">') +
+            dialogField("Compare vs (periods back)", '<input type="number" id="cfg-priorOffset" min="1" value="' + (parseInt(raw("priorOffset"), 10) || 1) + '">') +
+            '<p class="sub" style="margin:6px 0 0">Current / compare apply when Aggregation is “Latest period”.</p>' +
           "</fieldset>" +
 
           '<fieldset><legend>Labels</legend>' +
@@ -649,6 +725,9 @@
 
     function resetDialogToDefaults() {
       byId("cfg-aggregation").value = DEFAULTS.aggregation;
+      byId("cfg-periodGrain").value = DEFAULTS.periodGrain;
+      byId("cfg-currentOffset").value = DEFAULTS.currentOffset;
+      byId("cfg-priorOffset").value = DEFAULTS.priorOffset;
       byId("cfg-prefix").value = DEFAULTS.prefix;
       byId("cfg-suffix").value = DEFAULTS.suffix;
       byId("cfg-decimals").value = DEFAULTS.decimals;
@@ -667,6 +746,9 @@
     function saveDialog() {
       var s = tableau.extensions.settings;
       s.set("aggregation", byId("cfg-aggregation").value);
+      s.set("periodGrain", byId("cfg-periodGrain").value);
+      s.set("currentOffset", String(Math.max(0, parseInt(byId("cfg-currentOffset").value, 10) || 0)));
+      s.set("priorOffset", String(Math.max(1, parseInt(byId("cfg-priorOffset").value, 10) || 1)));
       s.set("prefix", byId("cfg-prefix").value);
       s.set("suffix", byId("cfg-suffix").value);
       s.set("decimals", String(parseInt(byId("cfg-decimals").value, 10) || 0));
