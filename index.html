@@ -106,6 +106,20 @@
     body:hover #gear { opacity: 0.7; }
     #gear:hover { opacity: 1; }
 
+    /* Version badge (viz mode only), bottom-left, inherits the card text color. */
+    #version {
+      position: fixed;
+      left: 10px;
+      bottom: 8px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: inherit;
+      opacity: 0.4;
+      pointer-events: none;
+      user-select: none;
+    }
+
     /* ---------- Configuration dialog (?dialog=1) ---------- */
     .cfg {
       box-sizing: border-box;
@@ -186,6 +200,10 @@
 
   <script>
     "use strict";
+
+    // Bump this when index.html changes; shown as a badge on the card and should
+    // match extension-version in super-kpi-card.trex.
+    var VERSION = "1.1.0";
 
     // These ids MUST match the <encoding id="..."> values in the .trex.
     var MEASURE_ENCODING_ID = "measure";
@@ -319,7 +337,10 @@
     }
 
     function applyTheme(cfg) {
-      root.style.background = cfg.bgColor;
+      // Keep the area behind the rounded card transparent so its corners reveal
+      // the Tableau zone behind it — not a second filled rectangle whose color
+      // leaks out past the card's rounded corners.
+      root.style.background = "transparent";
       root.style.color = cfg.textColor;
     }
 
@@ -340,7 +361,8 @@
       if (caption) {
         html += '<div class="kpi-caption"></div>';
       }
-      html += '</div><button id="gear" title="Configure" aria-label="Configure">&#9881;</button>';
+      html += '</div><button id="gear" title="Configure" aria-label="Configure">&#9881;</button>' +
+        '<div id="version">v' + VERSION + '</div>';
       root.innerHTML = html;
 
       var card = root.querySelector(".kpi-card");
@@ -368,7 +390,8 @@
     function renderMessage(cfg, text) {
       root.innerHTML =
         '<div class="kpi-card"><div class="kpi-message"></div></div>' +
-        '<button id="gear" title="Configure" aria-label="Configure">&#9881;</button>';
+        '<button id="gear" title="Configure" aria-label="Configure">&#9881;</button>' +
+        '<div id="version">v' + VERSION + '</div>';
       var card = root.querySelector(".kpi-card");
       card.style.background = cfg.bgColor;
       card.style.color = cfg.textColor;

@@ -6,7 +6,7 @@
     Child-element order below is schema-enforced: default-locale, name, description,
     author, min-api-version, source-location, icon, [permissions], then <encoding> tiles.
   -->
-  <worksheet-extension id="com.vizyourdata.superkpi" extension-version="1.0.0">
+  <worksheet-extension id="com.vizyourdata.superkpi" extension-version="1.1.0">
     <default-locale>en_US</default-locale>
     <name resource-id="name"/>
     <description>A big, bold single-value KPI card with optional period-over-period change.</description>
