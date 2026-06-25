@@ -59,6 +59,18 @@
       letter-spacing: 0.02em;
     }
 
+    .kpi-spark {
+      width: 78%;
+      max-width: 280px;
+      height: 34px;
+      margin-top: 0.1rem;
+    }
+    .kpi-spark .spark-svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
     .kpi-caption {
       font-size: 0.8rem;
       font-weight: 500;
@@ -190,10 +202,12 @@
       abbreviate: "true",   // shorten large numbers (48,200 -> 48.2K)
       captionPrefix: "As of ",
       showDelta: "true",    // show change vs previous period (needs a date + "latest")
+      showSpark: "true",    // show a sparkline of the measure over the date field
       bgColor: "#161E46",
       textColor: "#F4F2EC",
       upColor: "#3FB950",   // positive change
-      downColor: "#F85149"  // negative change
+      downColor: "#F85149", // negative change
+      sparkColor: "#6AA0FF" // sparkline stroke / fill
     };
 
     var root = document.getElementById("root");
@@ -215,10 +229,12 @@
         abbreviate: raw("abbreviate") === "true",
         captionPrefix: raw("captionPrefix"),
         showDelta: raw("showDelta") === "true",
+        showSpark: raw("showSpark") === "true",
         bgColor: raw("bgColor"),
         textColor: raw("textColor"),
         upColor: raw("upColor"),
-        downColor: raw("downColor")
+        downColor: raw("downColor"),
+        sparkColor: raw("sparkColor")
       };
     }
 
@@ -254,6 +270,33 @@
       return sign + cfg.prefix + body + cfg.suffix;
     }
 
+    /** Build a tiny inline SVG sparkline from an ordered array of numbers.
+        viewBox is stretched to fill the container (preserveAspectRatio="none");
+        the line keeps a constant 2px weight via vector-effect, and the faint
+        area fill underneath is unaffected by the non-uniform scaling. */
+    function sparklineSvg(values, color) {
+      var n = values.length;
+      var W = 100, H = 30, pad = 3;
+      var min = Math.min.apply(null, values);
+      var max = Math.max.apply(null, values);
+      var span = (max - min) || 1;
+      var pts = values.map(function (v, i) {
+        var x = (n === 1) ? W / 2 : (i / (n - 1)) * W;
+        var y = H - pad - ((v - min) / span) * (H - pad * 2);
+        return x.toFixed(2) + "," + y.toFixed(2);
+      });
+      var firstX = pts[0].split(",")[0];
+      var lastX = pts[pts.length - 1].split(",")[0];
+      var area = firstX + "," + H + " " + pts.join(" ") + " " + lastX + "," + H;
+      return '<svg class="spark-svg" viewBox="0 0 ' + W + ' ' + H + '" ' +
+        'preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+          '<polygon points="' + area + '" fill="' + color + '" fill-opacity="0.18" stroke="none"/>' +
+          '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + color + '" ' +
+            'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+            'vector-effect="non-scaling-stroke"/>' +
+        '</svg>';
+    }
+
     /** Combine a list of numbers per the chosen aggregation. */
     function aggregate(values, type) {
       if (values.length === 0) {
@@ -280,12 +323,17 @@
       root.style.color = cfg.textColor;
     }
 
-    /** Paint the card. delta is {pct, up} or null. caption is a string or null. */
-    function renderCard(cfg, label, value, caption, delta) {
+    /** Paint the card. delta is {pct, up} or null. caption is a string or null.
+        series is an ordered array of period values (for the sparkline) or null. */
+    function renderCard(cfg, label, value, caption, delta, series) {
+      var hasSpark = cfg.showSpark && series && series.length >= 2;
       var html =
         '<div class="kpi-card">' +
           '<div class="kpi-label"></div>' +
           '<div class="kpi-value"></div>';
+      if (hasSpark) {
+        html += '<div class="kpi-spark"></div>';
+      }
       if (delta) {
         html += '<div class="kpi-delta"></div>';
       }
@@ -295,9 +343,16 @@
       html += '</div><button id="gear" title="Configure" aria-label="Configure">&#9881;</button>';
       root.innerHTML = html;
 
+      var card = root.querySelector(".kpi-card");
+      card.style.background = cfg.bgColor;
+      card.style.color = cfg.textColor;
+
       root.querySelector(".kpi-label").textContent = cfg.title || label;
       root.querySelector(".kpi-value").textContent = formatValue(value, cfg);
 
+      if (hasSpark) {
+        root.querySelector(".kpi-spark").innerHTML = sparklineSvg(series, cfg.sparkColor);
+      }
       if (delta) {
         var d = root.querySelector(".kpi-delta");
         var arrow = delta.up ? "▲" : "▼";
@@ -314,6 +369,9 @@
       root.innerHTML =
         '<div class="kpi-card"><div class="kpi-message"></div></div>' +
         '<button id="gear" title="Configure" aria-label="Configure">&#9881;</button>';
+      var card = root.querySelector(".kpi-card");
+      card.style.background = cfg.bgColor;
+      card.style.color = cfg.textColor;
       root.querySelector(".kpi-message").textContent = text;
       wireGear();
     }
@@ -430,9 +488,12 @@
       var times = Object.keys(sums).map(Number).sort(function (a, b) { return a - b; });
 
       if (times.length === 0) {
-        renderCard(cfg, measureField.name, aggregate(values, cfg.aggregation), null, null);
+        renderCard(cfg, measureField.name, aggregate(values, cfg.aggregation), null, null, null);
         return;
       }
+
+      // The per-period series (oldest -> newest) drives the sparkline.
+      var seriesVals = times.map(function (t) { return sums[t].value; });
 
       // "latest" shows the most recent period (and optional period-over-period delta).
       if (cfg.aggregation === "latest") {
@@ -446,12 +507,13 @@
             delta = { pct: pct, up: pct >= 0 };
           }
         }
-        renderCard(cfg, measureField.name, last.value, caption, delta);
+        renderCard(cfg, measureField.name, last.value, caption, delta, seriesVals);
         return;
       }
 
-      // Other aggregations with a date: aggregate across all rows, no caption.
-      renderCard(cfg, measureField.name, aggregate(values, cfg.aggregation), null, null);
+      // Other aggregations with a date: value is aggregated across all rows, but
+      // the sparkline still shows the per-period trend.
+      renderCard(cfg, measureField.name, aggregate(values, cfg.aggregation), null, null, seriesVals);
     }
 
     /** Open the config dialog (this same page, in dialog mode). */
@@ -530,6 +592,7 @@
             dialogField("Title (blank = field name)", txt("title")) +
             dialogField("Date caption prefix", txt("captionPrefix")) +
             dialogField("Show change vs previous period", check("showDelta")) +
+            dialogField("Show sparkline (needs date)", check("showSpark")) +
           "</fieldset>" +
 
           '<fieldset><legend>Colors</legend>' +
@@ -537,6 +600,7 @@
             dialogField("Text", color("textColor")) +
             dialogField("Positive change", color("upColor")) +
             dialogField("Negative change", color("downColor")) +
+            dialogField("Sparkline", color("sparkColor")) +
           "</fieldset>" +
 
           '<div class="actions">' +
@@ -569,10 +633,12 @@
       byId("cfg-title").value = DEFAULTS.title;
       byId("cfg-captionPrefix").value = DEFAULTS.captionPrefix;
       byId("cfg-showDelta").checked = DEFAULTS.showDelta === "true";
+      byId("cfg-showSpark").checked = DEFAULTS.showSpark === "true";
       byId("cfg-bgColor").value = DEFAULTS.bgColor;
       byId("cfg-textColor").value = DEFAULTS.textColor;
       byId("cfg-upColor").value = DEFAULTS.upColor;
       byId("cfg-downColor").value = DEFAULTS.downColor;
+      byId("cfg-sparkColor").value = DEFAULTS.sparkColor;
     }
 
     function saveDialog() {
@@ -585,10 +651,12 @@
       s.set("title", byId("cfg-title").value);
       s.set("captionPrefix", byId("cfg-captionPrefix").value);
       s.set("showDelta", byId("cfg-showDelta").checked ? "true" : "false");
+      s.set("showSpark", byId("cfg-showSpark").checked ? "true" : "false");
       s.set("bgColor", byId("cfg-bgColor").value);
       s.set("textColor", byId("cfg-textColor").value);
       s.set("upColor", byId("cfg-upColor").value);
       s.set("downColor", byId("cfg-downColor").value);
+      s.set("sparkColor", byId("cfg-sparkColor").value);
       s.saveAsync().then(function () {
         tableau.extensions.ui.closeDialog("saved");
       });
